@@ -130,7 +130,8 @@ namespace OneDriveTidy.Core.Services
             // LiteDB v5 supports SQL
             try 
             {
-                var result = _db.Execute("SELECT SUM(Size) FROM driveItems");
+                // Only sum files, not folders, to avoid double counting
+                var result = _db.Execute("SELECT SUM(Size) FROM driveItems WHERE IsFolder = false");
                 if (result.Read() && !result.Current.IsNull)
                 {
                     return result.Current.AsInt64;
@@ -140,7 +141,7 @@ namespace OneDriveTidy.Core.Services
             {
                 // Fallback
                 var col = _db.GetCollection<DriveItemModel>(CollectionName);
-                return col.FindAll().Sum(x => x.Size ?? 0);
+                return col.Find(x => !x.IsFolder).Sum(x => x.Size ?? 0);
             }
             return 0;
         }
