@@ -5,6 +5,7 @@ using Microsoft.Graph.Models;
 using OneDriveTidy.Core.Models;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -19,6 +20,8 @@ namespace OneDriveTidy.Core.Services
         private GraphServiceClient? _graphClient;
         private readonly DatabaseService _dbService;
         private readonly IConfiguration _configuration;
+        private readonly string _authRecordPath;
+        private AuthenticationRecord? _authRecord;
 
         public event Action<string>? ScanStatusChanged;
         public event Action<int>? ItemsProcessed;
@@ -27,6 +30,9 @@ namespace OneDriveTidy.Core.Services
         {
             _dbService = dbService;
             _configuration = configuration;
+            
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            _authRecordPath = Path.Combine(appData, "OneDriveTidy", "auth_record.json");
         }
 
         public async Task InitializeAsync()
@@ -50,7 +56,33 @@ namespace OneDriveTidy.Core.Services
                 }
             };
 
+            // Try to load persisted authentication record
+            if (File.Exists(_authRecordPath))
+            {
+                try 
+                {
+                    using var stream = File.OpenRead(_authRecordPath);
+                    _authRecord = await AuthenticationRecord.DeserializeAsync(stream);
+                    options.AuthenticationRecord = _authRecord;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to load auth record: {ex.Message}");
+                    // Corrupt record, ignore and re-authenticate
+                }
+            }
+
             var credential = new InteractiveBrowserCredential(options);
+
+            // If we don't have a record, authenticate interactively and save it
+            if (_authRecord == null)
+            {
+                _authRecord = await credential.AuthenticateAsync();
+                
+                using var stream = new FileStream(_authRecordPath, FileMode.Create, FileAccess.Write);
+                await _authRecord.SerializeAsync(stream);
+            }
+
             _graphClient = new GraphServiceClient(credential, _scopes);
 
             // Test connection
