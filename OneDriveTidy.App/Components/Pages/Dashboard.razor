@@ -1,0 +1,164 @@
+@page "/dashboard"
+@using OneDriveTidy.Core.Services
+@using OneDriveTidy.Core.Models
+@inject GraphService GraphService
+@inject DatabaseService DbService
+@rendermode InteractiveServer
+
+@implements IDisposable
+
+<h3>OneDrive Tidy Dashboard</h3>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Scanner</h5>
+                <p>Status: @StatusMessage</p>
+                <p>Items Processed: @ItemsProcessed</p>
+                
+                @if (!IsScanning)
+                {
+                    <button class="btn btn-primary" @onclick="StartScan">Start Scan</button>
+                }
+                else
+                {
+                    <button class="btn btn-secondary" disabled>Scanning...</button>
+                }
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Database Stats</h5>
+                <p>Total Items: @TotalItems</p>
+                <p>Total Size: @FormatSize(TotalSize)</p>
+                <hr/>
+                <p>Duplicate Groups: @DuplicateCount</p>
+                <p>Potential Savings: @FormatSize(WastedSize)</p>
+                <button class="btn btn-info" @onclick="() => RefreshStats(true)">Refresh Stats</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private string StatusMessage = "Ready";
+    private int ItemsProcessed = 0;
+    private bool IsScanning = false;
+    private long TotalItems = 0;
+    private long TotalSize = 0;
+    private int DuplicateCount = 0;
+    private long WastedSize = 0;
+
+    private Action<string>? _onScanStatusChanged;
+    private Action<int>? _onItemsProcessed;
+
+    protected override void OnInitialized()
+    {
+        // Sync state with GraphService
+        IsScanning = GraphService.IsScanning;
+        if (IsScanning)
+        {
+            StatusMessage = "Scanning in progress...";
+        }
+
+        _ = RefreshStats(true);
+        
+        _onScanStatusChanged = (msg) => 
+        {
+            StatusMessage = msg;
+            InvokeAsync(StateHasChanged);
+        };
+
+        _onItemsProcessed = (count) =>
+        {
+            ItemsProcessed = count;
+            // Refresh stats every 100 items to avoid UI lag
+            if (count % 100 == 0) 
+            {
+                // Only refresh quick stats (item count), skip heavy duplicate calculation
+                _ = RefreshStats(false);
+            }
+            InvokeAsync(StateHasChanged);
+        };
+
+        GraphService.ScanStatusChanged += _onScanStatusChanged;
+        GraphService.ItemsProcessed += _onItemsProcessed;
+    }
+
+    private async Task StartScan()
+    {
+        if (IsScanning) return;
+        
+        IsScanning = true;
+        try
+        {
+            if (!GraphService.IsInitialized)
+            {
+                await GraphService.InitializeAsync();
+            }
+
+            // Fire and forget the scan task so it continues if we navigate away
+            // But we await it here to catch errors if we stay on the page
+            await GraphService.ScanAllFilesAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            IsScanning = false;
+            await RefreshStats(true);
+        }
+    }
+
+    private async Task RefreshStats(bool fullRefresh)
+    {
+        try
+        {
+            await Task.Run(() => 
+            {
+                TotalItems = DbService.GetItemCount();
+                if (fullRefresh)
+                {
+                    TotalSize = DbService.GetTotalSize();
+                    var stats = DbService.GetDuplicateStats();
+                    DuplicateCount = stats.GroupCount;
+                    WastedSize = stats.WastedSize;
+                }
+            });
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            // Log error or ignore if disposing
+            Console.WriteLine($"Error refreshing stats: {ex.Message}");
+        }
+    }
+
+    private string FormatSize(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = (double)bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len = len / 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+
+    public void Dispose()
+    {
+        if (_onScanStatusChanged != null)
+            GraphService.ScanStatusChanged -= _onScanStatusChanged;
+            
+        if (_onItemsProcessed != null)
+            GraphService.ItemsProcessed -= _onItemsProcessed;
+    }
+}

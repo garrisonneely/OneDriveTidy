@@ -1,0 +1,253 @@
+@page "/duplicates"
+@using OneDriveTidy.Core.Services
+@using OneDriveTidy.Core.Models
+@inject DatabaseService DbService
+@inject GraphService GraphService
+@rendermode InteractiveServer
+
+<h3>Duplicate Manager</h3>
+
+<div class="row mb-3">
+    <div class="col">
+        <button class="btn btn-primary" @onclick="LoadDuplicates" disabled="@IsDeleting">Find Duplicates</button>
+        <button class="btn btn-danger ms-2" @onclick="DeleteSelected" disabled="@(!HasSelection || IsDeleting)">
+            @if (IsDeleting) { <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> }
+            Delete Selected (@SelectedCount)
+        </button>
+        <span class="ms-3">Found @DuplicateGroups.Count groups of duplicates.</span>
+    </div>
+</div>
+
+@if (IsLoading)
+{
+    <div class="alert alert-info">Loading duplicates...</div>
+}
+
+@if (DuplicateGroups.Any())
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            Page @CurrentPage of @TotalPages
+        </div>
+        <div>
+            <button class="btn btn-secondary btn-sm" @onclick="PrevPage" disabled="@(CurrentPage == 1)">Previous</button>
+            <button class="btn btn-secondary btn-sm" @onclick="NextPage" disabled="@(CurrentPage == TotalPages)">Next</button>
+        </div>
+    </div>
+}
+
+@foreach (var group in PagedGroups)
+{
+    <div class="card mb-3">
+        <div class="card-header">
+            <strong>Hash:</strong> @group.Key <br/>
+            <small>Size: @FormatSize(group.First().Item.Size)</small>
+        </div>
+        <ul class="list-group list-group-flush">
+            @foreach (var item in group)
+            {
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <div class="d-flex align-items-center">
+                        <input type="checkbox" class="form-check-input me-3" @bind="item.IsSelected" />
+                        <div>
+                            <strong>@item.Item.Name</strong><br/>
+                            <small class="text-muted">@item.Item.Path</small><br/>
+                            <small class="text-muted">Modified: @item.Item.LastModifiedDateTime</small>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger btn-sm" @onclick="() => DeleteItem(item.Item)" disabled="@IsDeleting">Delete</button>
+                </li>
+            }
+        </ul>
+    </div>
+}
+
+@if (DuplicateGroups.Any())
+{
+    <div class="d-flex justify-content-center mt-3">
+        <button class="btn btn-secondary btn-sm me-2" @onclick="PrevPage" disabled="@(CurrentPage == 1)">Previous</button>
+        <button class="btn btn-secondary btn-sm" @onclick="NextPage" disabled="@(CurrentPage == TotalPages)">Next</button>
+    </div>
+}
+
+@code {
+    private class DuplicateItemViewModel
+    {
+        public DriveItemModel Item { get; set; } = new();
+        public bool IsSelected { get; set; }
+    }
+
+    private List<IGrouping<string?, DuplicateItemViewModel>> DuplicateGroups = new();
+    private bool IsLoading = false;
+    
+    // Paging
+    private int CurrentPage = 1;
+    private const int PageSize = 50;
+    private int TotalPages => (int)Math.Ceiling((double)DuplicateGroups.Count / PageSize);
+    
+    private IEnumerable<IGrouping<string?, DuplicateItemViewModel>> PagedGroups => 
+        DuplicateGroups.Skip((CurrentPage - 1) * PageSize).Take(PageSize);
+
+    private bool HasSelection => DuplicateGroups.SelectMany(g => g).Any(i => i.IsSelected);
+    private int SelectedCount => DuplicateGroups.SelectMany(g => g).Count(i => i.IsSelected);
+
+    private void NextPage()
+    {
+        if (CurrentPage < TotalPages) CurrentPage++;
+    }
+
+    private void PrevPage()
+    {
+        if (CurrentPage > 1) CurrentPage--;
+    }
+
+    private async Task LoadDuplicates()
+    {
+        try
+        {
+            IsLoading = true;
+            CurrentPage = 1; // Reset to first page on reload
+            await InvokeAsync(StateHasChanged); 
+
+            // Run heavy DB query in background
+            var groups = await Task.Run(() => 
+            {
+                var rawDuplicates = DbService.GetDuplicates();
+                
+                // Sort by size descending
+                return rawDuplicates
+                    .OrderByDescending(g => g.First().Size ?? 0)
+                    .Select(g => g.Select(i => new DuplicateItemViewModel { Item = i }).GroupBy(x => x.Item.ContentHash).First())
+                    .ToList();
+            });
+
+            DuplicateGroups = groups;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading duplicates: {ex}");
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private bool IsDeleting = false;
+
+    private async Task DeleteSelected()
+    {
+        if (IsDeleting) return;
+        
+        // Get ALL selected items across all pages
+        var selectedItems = DuplicateGroups.SelectMany(g => g).Where(i => i.IsSelected).ToList();
+        if (!selectedItems.Any()) return;
+
+        IsDeleting = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            if (!GraphService.IsInitialized)
+            {
+                await GraphService.InitializeAsync();
+            }
+
+            // 1. Delete from Graph (Cloud)
+            foreach (var vm in selectedItems)
+            {
+                try 
+                {
+                    await GraphService.DeleteItemAsync(vm.Item.Id);
+                }
+                catch (Exception ex)
+                {
+                    // If resource not found (404), it's already deleted, so we can proceed to delete from DB
+                    if (ex.Message.Contains("The resource could not be found") || ex.Message.Contains("404"))
+                    {
+                        Console.WriteLine($"Item {vm.Item.Name} already deleted from Graph.");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Failed to delete {vm.Item.Name} from Graph: {ex.Message}");
+                        // If it's a real error (e.g. permission), maybe we shouldn't delete from DB?
+                        // For now, we assume we want to clean up DB if we tried our best.
+                    }
+                }
+            }
+
+            // 3. Batch delete from DB
+            var idsToDelete = selectedItems.Select(x => x.Item.Id).ToList();
+            DbService.DeleteItems(idsToDelete);
+
+            await LoadDuplicates();
+        }
+        catch (Exception ex)
+        {
+             Console.WriteLine($"Error deleting batch: {ex.Message}");
+        }
+        finally
+        {
+            IsDeleting = false;
+        }
+    }
+
+    private async Task DeleteItem(DriveItemModel item)
+    {
+        if (IsDeleting) return;
+        IsDeleting = true;
+        await InvokeAsync(StateHasChanged);
+
+        try 
+        {
+            if (!GraphService.IsInitialized)
+            {
+                await GraphService.InitializeAsync();
+            }
+
+            try 
+            {
+                await GraphService.DeleteItemAsync(item.Id);
+            }
+            catch (Exception ex)
+            {
+                 if (ex.Message.Contains("The resource could not be found") || ex.Message.Contains("404"))
+                 {
+                     Console.WriteLine($"Item {item.Name} already deleted from Graph.");
+                 }
+                 else
+                 {
+                     throw; // Re-throw if it's not a 404
+                 }
+            }
+            
+            // Remove from DB
+            DbService.DeleteItem(item.Id);
+            
+            // Refresh UI
+            await LoadDuplicates();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error deleting item: {ex.Message}");
+        }
+        finally
+        {
+            IsDeleting = false;
+        }
+    }
+
+    private string FormatSize(long? bytes)
+    {
+        if (bytes == null) return "0 B";
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = (double)bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len = len / 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+}

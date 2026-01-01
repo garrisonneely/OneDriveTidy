@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneDriveTidy.Core", "OneDriveTidy.Core\OneDriveTidy.Core.csproj", "{3549D9BA-DC69-4F99-AAC4-CF984FC9952A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneDriveTidy.App", "OneDriveTidy.App\OneDriveTidy.App.csproj", "{5A6B9D9B-8E4F-444C-A03A-BE32D6AFD508}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3549D9BA-DC69-4F99-AAC4-CF984FC9952A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3549D9BA-DC69-4F99-AAC4-CF984FC9952A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3549D9BA-DC69-4F99-AAC4-CF984FC9952A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3549D9BA-DC69-4F99-AAC4-CF984FC9952A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5A6B9D9B-8E4F-444C-A03A-BE32D6AFD508}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5A6B9D9B-8E4F-444C-A03A-BE32D6AFD508}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5A6B9D9B-8E4F-444C-A03A-BE32D6AFD508}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5A6B9D9B-8E4F-444C-A03A-BE32D6AFD508}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
