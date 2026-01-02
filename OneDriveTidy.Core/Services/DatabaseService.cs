@@ -145,13 +145,20 @@ namespace OneDriveTidy.Core.Services
                 try 
                 {
                     // 1. Find duplicate hashes
-                    var duplicateHashes = _db.Execute(@"
+                    var duplicateHashes = new List<string>();
+                    using (var reader = _db.Execute(@"
                         SELECT ContentHash 
                         FROM driveItems 
                         WHERE IsFolder = false AND ContentHash != null 
                         GROUP BY ContentHash 
                         HAVING COUNT(*) > 1
-                    ").ToEnumerable().Select(x => x["ContentHash"].AsString).ToList();
+                    "))
+                    {
+                        while(reader.Read())
+                        {
+                            duplicateHashes.Add(reader.Current["ContentHash"].AsString);
+                        }
+                    }
 
                     _logger.LogInformation("Found {Count} duplicate groups.", duplicateHashes.Count);
 
@@ -207,17 +214,24 @@ namespace OneDriveTidy.Core.Services
                 if (_isDisposed) return 0;
                 try 
                 {
-                    var result = _db.Execute("SELECT SUM(Size) FROM driveItems WHERE IsFolder = false");
+                    using var result = _db.Execute("SELECT SUM(Size) FROM driveItems WHERE IsFolder = false");
                     if (result.Read() && !result.Current.IsNull)
                     {
-                        return result.Current.AsInt64;
+                        // result.Current is a document like { "SUM(Size)": 12345 }
+                        // We grab the first value
+                        var val = result.Current.AsDocument.Values.FirstOrDefault();
+                        return val.IsNumber ? val.AsInt64 : 0;
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Error calculating total size via SQL, falling back.");
-                    var col = _db.GetCollection<DriveItemModel>(CollectionName);
-                    return col.Find(x => !x.IsFolder).Sum(x => x.Size ?? 0);
+                    try 
+                    {
+                        var col = _db.GetCollection<DriveItemModel>(CollectionName);
+                        return col.Find(x => !x.IsFolder).Sum(x => x.Size ?? 0);
+                    }
+                    catch {}
                 }
                 return 0;
             }
@@ -232,13 +246,10 @@ namespace OneDriveTidy.Core.Services
                 _logger.LogInformation("Calculating duplicate stats...");
                 try 
                 {
-                    // Use SQL aggregation for speed
-                    // We want: SUM((Count - 1) * Size) for each group
-                    // LiteDB SQL doesn't support complex aggregation easily in one go, 
-                    // but we can get the groups and sum them up.
-                    
-                    var result = _db.Execute(@"
-                        SELECT COUNT(*) AS Cnt, FIRST(Size) AS Sz
+                    // Use MAX(Size) instead of FIRST(Size)
+                    // Ensure we dispose the reader to release locks!
+                    using var result = _db.Execute(@"
+                        SELECT COUNT(*) AS Cnt, MAX(Size) AS Sz
                         FROM driveItems
                         WHERE IsFolder = false AND ContentHash != null
                         GROUP BY ContentHash
@@ -248,8 +259,9 @@ namespace OneDriveTidy.Core.Services
                     int groupCount = 0;
                     long wastedSize = 0;
 
-                    foreach(var row in result.ToEnumerable())
+                    while(result.Read())
                     {
+                        var row = result.Current;
                         groupCount++;
                         var count = row["Cnt"].AsInt32;
                         var size = row["Sz"].AsInt64;
