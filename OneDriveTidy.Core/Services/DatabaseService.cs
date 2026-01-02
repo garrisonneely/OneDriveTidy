@@ -18,7 +18,9 @@ namespace OneDriveTidy.Core.Services
         public DatabaseService(string dbPath)
         {
             // Keep a single instance open for thread safety and to avoid file lock issues
-            _db = new LiteDatabase(dbPath);
+            // Use Connection=Shared to prevent "Use EnterTransaction() before EnterLock(name)" errors during concurrent access
+            var connectionString = $"Filename={dbPath};Connection=Shared";
+            _db = new LiteDatabase(connectionString);
             Initialize();
         }
 

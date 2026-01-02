@@ -68,26 +68,46 @@ namespace OneDriveTidy.Core.Services
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Failed to load auth record: {ex.Message}");
-                    // Corrupt record, ignore and re-authenticate
+                    // Corrupt record, ignore
                 }
             }
 
             var credential = new InteractiveBrowserCredential(options);
 
-            // If we don't have a record, authenticate interactively and save it
-            if (_authRecord == null)
+            try 
             {
-                _authRecord = await credential.AuthenticateAsync();
-                
-                using var stream = new FileStream(_authRecordPath, FileMode.Create, FileAccess.Write);
-                await _authRecord.SerializeAsync(stream);
+                _graphClient = new GraphServiceClient(credential, _scopes);
+                // Test connection to verify token/record is valid
+                var user = await _graphClient.Me.GetAsync();
+                ScanStatusChanged?.Invoke($"Connected as: {user?.DisplayName}");
+                return;
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Initial auth check failed: {ex.Message}. Retrying interactively...");
+                // If the cached credential failed, we need to clear it and try fresh
+                if (_authRecord != null)
+                {
+                    // Clear the record from options and retry
+                    options.AuthenticationRecord = null;
+                    credential = new InteractiveBrowserCredential(options);
+                    
+                    // Delete the invalid file
+                    try { File.Delete(_authRecordPath); } catch { }
+                }
+            }
+
+            // If we are here, we need to authenticate interactively
+            _authRecord = await credential.AuthenticateAsync();
+            
+            using var writeStream = new FileStream(_authRecordPath, FileMode.Create, FileAccess.Write);
+            await _authRecord.SerializeAsync(writeStream);
 
             _graphClient = new GraphServiceClient(credential, _scopes);
 
             // Test connection
-            var user = await _graphClient.Me.GetAsync();
-            ScanStatusChanged?.Invoke($"Connected as: {user?.DisplayName}");
+            var finalUser = await _graphClient.Me.GetAsync();
+            ScanStatusChanged?.Invoke($"Connected as: {finalUser?.DisplayName}");
         }
 
         public bool IsInitialized => _graphClient != null;
