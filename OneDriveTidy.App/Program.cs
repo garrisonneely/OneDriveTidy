@@ -13,7 +13,17 @@ string dbPath = Path.Combine(appData, "OneDriveTidy", "onedrive_index.db");
 // Ensure directory exists
 Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
 
-builder.Services.AddSingleton<DatabaseService>(sp => new DatabaseService(dbPath));
+builder.Services.AddLogging(logging => 
+{
+    logging.AddConsole();
+    logging.AddDebug();
+});
+
+builder.Services.AddSingleton<DatabaseService>(sp => 
+{
+    var logger = sp.GetRequiredService<ILogger<DatabaseService>>();
+    return new DatabaseService(dbPath, logger);
+});
 builder.Services.AddSingleton<GraphService>();
 
 var app = builder.Build();

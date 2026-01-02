@@ -1,5 +1,6 @@
 using Azure.Identity;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
 using OneDriveTidy.Core.Models;
@@ -20,16 +21,18 @@ namespace OneDriveTidy.Core.Services
         private GraphServiceClient? _graphClient;
         private readonly DatabaseService _dbService;
         private readonly IConfiguration _configuration;
+        private readonly ILogger<GraphService> _logger;
         private readonly string _authRecordPath;
         private AuthenticationRecord? _authRecord;
 
         public event Action<string>? ScanStatusChanged;
         public event Action<int>? ItemsProcessed;
 
-        public GraphService(DatabaseService dbService, IConfiguration configuration)
+        public GraphService(DatabaseService dbService, IConfiguration configuration, ILogger<GraphService> logger)
         {
             _dbService = dbService;
             _configuration = configuration;
+            _logger = logger;
             
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             _authRecordPath = Path.Combine(appData, "OneDriveTidy", "auth_record.json");
@@ -37,6 +40,7 @@ namespace OneDriveTidy.Core.Services
 
         public async Task InitializeAsync()
         {
+            _logger.LogInformation("Initializing GraphService...");
             var clientId = _configuration["AzureAd:ClientId"];
             var tenantId = _configuration["AzureAd:TenantId"];
 
@@ -64,10 +68,11 @@ namespace OneDriveTidy.Core.Services
                     using var stream = File.OpenRead(_authRecordPath);
                     _authRecord = await AuthenticationRecord.DeserializeAsync(stream);
                     options.AuthenticationRecord = _authRecord;
+                    _logger.LogInformation("Loaded persisted auth record.");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Failed to load auth record: {ex.Message}");
+                    _logger.LogWarning(ex, "Failed to load auth record.");
                     // Corrupt record, ignore
                 }
             }
@@ -80,11 +85,12 @@ namespace OneDriveTidy.Core.Services
                 // Test connection to verify token/record is valid
                 var user = await _graphClient.Me.GetAsync();
                 ScanStatusChanged?.Invoke($"Connected as: {user?.DisplayName}");
+                _logger.LogInformation("Connected as: {DisplayName}", user?.DisplayName);
                 return;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Initial auth check failed: {ex.Message}. Retrying interactively...");
+                _logger.LogWarning(ex, "Initial auth check failed: {Message}. Retrying interactively...", ex.Message);
                 // If the cached credential failed, we need to clear it and try fresh
                 if (_authRecord != null)
                 {
@@ -108,6 +114,7 @@ namespace OneDriveTidy.Core.Services
             // Test connection
             var finalUser = await _graphClient.Me.GetAsync();
             ScanStatusChanged?.Invoke($"Connected as: {finalUser?.DisplayName}");
+            _logger.LogInformation($"Connected as: {finalUser?.DisplayName}");
         }
 
         public bool IsInitialized => _graphClient != null;
@@ -120,6 +127,7 @@ namespace OneDriveTidy.Core.Services
 
             IsScanning = true;
             ScanStatusChanged?.Invoke("Starting scan...");
+            _logger.LogInformation("Starting scan...");
 
             try 
             {
@@ -136,6 +144,7 @@ namespace OneDriveTidy.Core.Services
                 if (string.IsNullOrEmpty(deltaUrl))
                 {
                     // Fresh scan
+                    _logger.LogInformation("No delta link found. Starting fresh scan.");
                     deltaResponse = await ExecuteFreshScanAsync(drive.Id, cancellationToken);
                 }
                 else
@@ -143,6 +152,7 @@ namespace OneDriveTidy.Core.Services
                     // Incremental / Resume scan
                     try 
                     {
+                        _logger.LogInformation("Resuming scan from delta link.");
                         deltaResponse = await _graphClient.Drives[drive.Id].Items["root"]
                             .Delta
                             .WithUrl(deltaUrl)
@@ -151,7 +161,9 @@ namespace OneDriveTidy.Core.Services
                     catch (Exception ex)
                     {
                         // If the link is expired or invalid (410 Gone, etc.), restart fresh
-                        ScanStatusChanged?.Invoke($"Resume link invalid ({ex.Message}). Restarting fresh scan...");
+                        var msg = $"Resume link invalid ({ex.Message}). Restarting fresh scan...";
+                        ScanStatusChanged?.Invoke(msg);
+                        _logger.LogWarning(msg);
                         deltaResponse = await ExecuteFreshScanAsync(drive.Id, cancellationToken);
                     }
                 }
@@ -189,7 +201,11 @@ namespace OneDriveTidy.Core.Services
                         _dbService.UpsertItems(batch);
                         processedCount += batch.Count;
                         ItemsProcessed?.Invoke(processedCount);
-                        ScanStatusChanged?.Invoke($"Processed {processedCount} items...");
+                        if (processedCount % 100 == 0)
+                        {
+                            ScanStatusChanged?.Invoke($"Processed {processedCount} items...");
+                            _logger.LogInformation("Processed {ProcessedCount} items...", processedCount);
+                        }
                         
                         // Save checkpoint immediately so we can resume if stopped
                         if (!string.IsNullOrEmpty(nextPageLink))
@@ -217,6 +233,13 @@ namespace OneDriveTidy.Core.Services
                 }
 
                 ScanStatusChanged?.Invoke("Scan complete.");
+                _logger.LogInformation("Scan complete.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Scan failed.");
+                ScanStatusChanged?.Invoke($"Scan failed: {ex.Message}");
+                throw;
             }
             finally
             {
@@ -249,6 +272,7 @@ namespace OneDriveTidy.Core.Services
             if (drive?.Id == null) throw new InvalidOperationException("Could not get Drive ID");
 
             await _graphClient.Drives[drive.Id].Items[itemId].DeleteAsync();
+            _logger.LogInformation("Deleted item {ItemId} from Graph.", itemId);
         }
 
         private DriveItemModel MapToModel(DriveItem item)
