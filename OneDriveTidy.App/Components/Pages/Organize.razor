@@ -1,0 +1,97 @@
+@page "/organize"
+@using OneDriveTidy.Core.Services
+@inject GraphService GraphService
+@inject ILogger<Organize> Logger
+
+<PageTitle>Organize Folder</PageTitle>
+
+<h1>Organize Folder</h1>
+
+<p>Organize files in a folder into a Year/Month structure based on Date Taken.</p>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="mb-3">
+            <label for="folderPath" class="form-label">Folder Path (relative to root)</label>
+            <input type="text" class="form-control" id="folderPath" @bind="folderPath" placeholder="Pictures/Camera Roll" />
+        </div>
+        <div class="mb-3">
+            <label for="startYear" class="form-label">Start Year</label>
+            <input type="number" class="form-control" id="startYear" @bind="startYear" />
+        </div>
+        <div class="mb-3">
+            <label for="endYear" class="form-label">End Year</label>
+            <input type="number" class="form-control" id="endYear" @bind="endYear" />
+        </div>
+        
+        <button class="btn btn-primary" @onclick="StartOrganization" disabled="@isRunning">
+            @if (isRunning)
+            {
+                <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                <span> Organizing...</span>
+            }
+            else
+            {
+                <span>Start Organization</span>
+            }
+        </button>
+    </div>
+</div>
+
+<div class="mt-4">
+    <h4>Status</h4>
+    <div class="alert alert-info">
+        @statusMessage
+    </div>
+</div>
+
+@code {
+    private string folderPath = "Pictures/Camera Roll";
+    private int startYear = 2000;
+    private int endYear = DateTime.Now.Year;
+    private bool isRunning = false;
+    private string statusMessage = "Ready";
+    private CancellationTokenSource? cts;
+
+    protected override void OnInitialized()
+    {
+        GraphService.ScanStatusChanged += OnStatusChanged;
+    }
+
+    private void OnStatusChanged(string status)
+    {
+        statusMessage = status;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task StartOrganization()
+    {
+        if (isRunning) return;
+
+        isRunning = true;
+        statusMessage = "Starting...";
+        cts = new CancellationTokenSource();
+
+        try
+        {
+            await GraphService.OrganizeFolderAsync(folderPath, startYear, endYear, cts.Token);
+            statusMessage = "Organization completed successfully.";
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"Error: {ex.Message}";
+            Logger.LogError(ex, "Organization failed");
+        }
+        finally
+        {
+            isRunning = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        GraphService.ScanStatusChanged -= OnStatusChanged;
+        cts?.Cancel();
+        cts?.Dispose();
+    }
+}

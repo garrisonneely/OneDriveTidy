@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Microsoft.Graph.Drives.Item.Items.Item.Delta;
+using System.Text.RegularExpressions;
 
 namespace OneDriveTidy.Core.Services
 {
@@ -263,6 +264,269 @@ namespace OneDriveTidy.Core.Services
                     }, cancellationToken);
         }
 
+        public async Task OrganizeFolderAsync(string folderPath, int startYear = 2000, int endYear = 2025, CancellationToken cancellationToken = default)
+        {
+            if (_graphClient == null) throw new InvalidOperationException("Graph Client not initialized.");
+
+            _logger.LogInformation("Starting organization of folder: {FolderPath}", folderPath);
+            ScanStatusChanged?.Invoke($"Organizing {folderPath}...");
+
+            var drive = await _graphClient.Me.Drive.GetAsync(cancellationToken: cancellationToken);
+            if (drive?.Id == null) throw new InvalidOperationException("Could not get Drive ID");
+
+            // Get the target folder ID by path
+            // Path should be relative to root, e.g., "Pictures/Camera Roll"
+            // If it starts with /, remove it.
+            string cleanPath = folderPath.TrimStart('/');
+            
+            DriveItem? targetFolder;
+            try 
+            {
+                if (string.IsNullOrEmpty(cleanPath))
+                {
+                    targetFolder = await _graphClient.Drives[drive.Id].Items["root"].GetAsync(cancellationToken: cancellationToken);
+                }
+                else
+                {
+                    targetFolder = await _graphClient.Drives[drive.Id].Root.ItemWithPath(cleanPath).GetAsync(cancellationToken: cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Folder not found: {FolderPath}", folderPath);
+                ScanStatusChanged?.Invoke($"Folder not found: {folderPath}");
+                return;
+            }
+
+            if (targetFolder?.Id == null) return;
+
+            // Get all items in the folder
+            var itemsResponse = await _graphClient.Drives[drive.Id].Items[targetFolder.Id].Children
+                .GetAsync(config =>
+                {
+                    config.QueryParameters.Select = new[] { "id", "name", "createdDateTime", "lastModifiedDateTime", "photo", "file", "folder", "parentReference" };
+                    config.QueryParameters.Top = 999;
+                }, cancellationToken);
+
+            var allItems = new List<DriveItem>();
+            var pageIterator = PageIterator<DriveItem, DriveItemCollectionResponse>.CreatePageIterator(
+                _graphClient, 
+                itemsResponse, 
+                (item) => { allItems.Add(item); return true; }
+            );
+            await pageIterator.IterateAsync(cancellationToken);
+
+            _logger.LogInformation("Found {Count} items in folder.", allItems.Count);
+            ScanStatusChanged?.Invoke($"Found {allItems.Count} items. Processing...");
+
+            int movedCount = 0;
+            int skippedCount = 0;
+            int errorCount = 0;
+
+            // Cache folder IDs to avoid repeated calls
+            // Key: "Year", Value: ID
+            // Key: "Year/Month", Value: ID
+            var folderCache = new Dictionary<string, string>();
+
+            foreach (var item in allItems)
+            {
+                if (cancellationToken.IsCancellationRequested) break;
+                if (item.Folder != null) continue; // Skip folders
+
+                // Determine Date
+                DateTime? date = GetDateFromItem(item);
+                if (date == null) 
+                {
+                    _logger.LogWarning("Could not determine date for {Name}", item.Name);
+                    continue;
+                }
+
+                int year = date.Value.Year;
+                int month = date.Value.Month;
+
+                // Validate range
+                if (year < startYear || year > endYear)
+                {
+                    // Fallback per script logic
+                    year = 2000;
+                    month = 1;
+                }
+
+                string monthStr = month.ToString("00");
+                string yearStr = year.ToString();
+                string yearKey = yearStr;
+                string monthKey = $"{yearStr}/{monthStr}";
+
+                try 
+                {
+                    // Ensure Year Folder
+                    if (!folderCache.ContainsKey(yearKey))
+                    {
+                        var yearFolderId = await EnsureFolderAsync(drive.Id, targetFolder.Id, yearStr, cancellationToken);
+                        if (yearFolderId != null) folderCache[yearKey] = yearFolderId;
+                    }
+
+                    if (folderCache.ContainsKey(yearKey))
+                    {
+                        // Ensure Month Folder
+                        if (!folderCache.ContainsKey(monthKey))
+                        {
+                            var monthFolderId = await EnsureFolderAsync(drive.Id, folderCache[yearKey], monthStr, cancellationToken);
+                            if (monthFolderId != null) folderCache[monthKey] = monthFolderId;
+                        }
+                    }
+
+                    if (folderCache.TryGetValue(monthKey, out var targetParentId))
+                    {
+                        // Check if already in correct folder (shouldn't happen if we are scanning the root of source, but good to check)
+                        if (item.ParentReference?.Id == targetParentId) 
+                        {
+                            skippedCount++;
+                            continue;
+                        }
+
+                        // Move Item
+                        // We need to handle name conflicts. The script skips if exists.
+                        // Graph API Patch with same parent and name will fail if conflict? 
+                        // Actually, we are changing parent. If name exists in new parent, it throws 409 or renames depending on config.
+                        // Default is fail?
+                        
+                        // Let's check if file exists in destination first? 
+                        // That's expensive (another call).
+                        // We can try to move and catch 409.
+
+                        var patchBody = new DriveItem
+                        {
+                            ParentReference = new ItemReference { Id = targetParentId },
+                            Name = item.Name
+                        };
+
+                        try 
+                        {
+                            await _graphClient.Drives[drive.Id].Items[item.Id]
+                                .PatchAsync(patchBody, cancellationToken: cancellationToken);
+                            
+                            movedCount++;
+                            if (movedCount % 10 == 0) ScanStatusChanged?.Invoke($"Moved {movedCount} files...");
+                        }
+                        catch (ServiceException ex) when (ex.ResponseStatusCode == 409 || ex.Message.Contains("name already exists"))
+                        {
+                            _logger.LogWarning("File {Name} already exists in {Year}/{Month}. Skipping.", item.Name, yearStr, monthStr);
+                            skippedCount++;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error processing file {Name}", item.Name);
+                    errorCount++;
+                }
+            }
+
+            string summary = $"Organization Complete. Moved: {movedCount}, Skipped: {skippedCount}, Errors: {errorCount}";
+            _logger.LogInformation(summary);
+            ScanStatusChanged?.Invoke(summary);
+        }
+
+        private async Task<string?> EnsureFolderAsync(string driveId, string parentId, string folderName, CancellationToken cancellationToken)
+        {
+            // Check if folder exists
+            try 
+            {
+                // List children of parent with filter name
+                var children = await _graphClient.Drives[driveId].Items[parentId].Children
+                    .GetAsync(c => 
+                    {
+                        c.QueryParameters.Filter = $"name eq '{folderName}' and folder ne null";
+                        c.QueryParameters.Select = new[] { "id" };
+                    }, cancellationToken);
+                
+                if (children?.Value != null && children.Value.Count > 0)
+                {
+                    return children.Value[0].Id;
+                }
+
+                // Create folder
+                var newFolder = new DriveItem
+                {
+                    Name = folderName,
+                    Folder = new Folder { },
+                    AdditionalData = new Dictionary<string, object>
+                    {
+                        { "@microsoft.graph.conflictBehavior", "fail" }
+                    }
+                };
+
+                var created = await _graphClient.Drives[driveId].Items[parentId].Children
+                    .PostAsync(newFolder, cancellationToken: cancellationToken);
+                
+                return created?.Id;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to ensure folder {FolderName}", folderName);
+                return null;
+            }
+        }
+
+        private DateTime? GetDateFromItem(DriveItem item)
+        {
+            // 1. Filename Parsing
+            if (!string.IsNullOrEmpty(item.Name))
+            {
+                // Pattern 1: YYYYMMDD_HHMMSS
+                var match1 = Regex.Match(item.Name, @"(\d{4})(\d{2})(\d{2})_\d{6}");
+                if (match1.Success)
+                {
+                    if (int.TryParse(match1.Groups[1].Value, out int y) && 
+                        int.TryParse(match1.Groups[2].Value, out int m) && 
+                        int.TryParse(match1.Groups[3].Value, out int d))
+                    {
+                        try { return new DateTime(y, m, d); } catch { }
+                    }
+                }
+
+                // Pattern 2: YYYY-MM-DD
+                var match2 = Regex.Match(item.Name, @"(\d{4})-(\d{2})-(\d{2})");
+                if (match2.Success)
+                {
+                    if (int.TryParse(match2.Groups[1].Value, out int y) && 
+                        int.TryParse(match2.Groups[2].Value, out int m) && 
+                        int.TryParse(match2.Groups[3].Value, out int d))
+                    {
+                        try { return new DateTime(y, m, d); } catch { }
+                    }
+                }
+
+                // Pattern 3: YYYYMMDD
+                var match3 = Regex.Match(item.Name, @"(\d{8})");
+                if (match3.Success)
+                {
+                    string s = match3.Groups[1].Value;
+                    if (int.TryParse(s.Substring(0, 4), out int y) && 
+                        int.TryParse(s.Substring(4, 2), out int m) && 
+                        int.TryParse(s.Substring(6, 2), out int d))
+                    {
+                        try { return new DateTime(y, m, d); } catch { }
+                    }
+                }
+            }
+
+            // 2. EXIF / Photo Metadata
+            if (item.Photo?.TakenDateTime != null)
+            {
+                return item.Photo.TakenDateTime.Value.DateTime;
+            }
+
+            // 3. Creation Time
+            if (item.CreatedDateTime != null)
+            {
+                return item.CreatedDateTime.Value.DateTime;
+            }
+
+            return null;
+        }
+
         public async Task DeleteItemAsync(string itemId)
         {
             if (_graphClient == null) throw new InvalidOperationException("Graph Client not initialized.");
@@ -288,7 +552,8 @@ namespace OneDriveTidy.Core.Services
                 CreatedDateTime = item.CreatedDateTime,
                 LastModifiedDateTime = item.LastModifiedDateTime,
                 IsFolder = item.Folder != null,
-                WebUrl = item.WebUrl
+                WebUrl = item.WebUrl,
+                PhotoTakenDate = item.Photo?.TakenDateTime?.DateTime
             };
         }
     }

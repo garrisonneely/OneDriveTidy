@@ -36,6 +36,7 @@ namespace OneDriveTidy.Core.Services
                 col.EnsureIndex(x => x.ContentHash);
                 col.EnsureIndex(x => x.ParentId);
                 col.EnsureIndex(x => x.Size); // Index for sorting by size
+                col.EnsureIndex(x => x.IsFolder);
             }
         }
 
@@ -145,20 +146,15 @@ namespace OneDriveTidy.Core.Services
                 try 
                 {
                     // 1. Find duplicate hashes
-                    var duplicateHashes = new List<string>();
-                    using (var reader = _db.Execute(@"
-                        SELECT ContentHash 
-                        FROM driveItems 
-                        WHERE IsFolder = false AND ContentHash != null 
-                        GROUP BY ContentHash 
-                        HAVING COUNT(*) > 1
-                    "))
-                    {
-                        while(reader.Read())
-                        {
-                            duplicateHashes.Add(reader.Current["ContentHash"].AsString);
-                        }
-                    }
+                    var colBson = _db.GetCollection<BsonDocument>(CollectionName);
+                    var duplicateHashes = colBson.Query()
+                        .Where("$.IsFolder = false AND $.ContentHash != null")
+                        .Select("$.ContentHash")
+                        .ToEnumerable()
+                        .GroupBy(x => x.AsString)
+                        .Where(g => g.Count() > 1)
+                        .Select(g => g.Key)
+                        .ToList();
 
                     _logger.LogInformation("Found {Count} duplicate groups.", duplicateHashes.Count);
 
@@ -214,26 +210,29 @@ namespace OneDriveTidy.Core.Services
                 if (_isDisposed) return 0;
                 try 
                 {
-                    using var result = _db.Execute("SELECT SUM(Size) FROM driveItems WHERE IsFolder = false");
-                    if (result.Read() && !result.Current.IsNull)
+                    var col = _db.GetCollection<BsonDocument>(CollectionName);
+                    // Use Find directly without projection to avoid parsing issues
+                    var items = col.Find("$.IsFolder = false");
+                    
+                    long total = 0;
+                    int count = 0;
+                    foreach(var doc in items)
                     {
-                        // result.Current is a document like { "SUM(Size)": 12345 }
-                        // We grab the first value
-                        var val = result.Current.AsDocument.Values.FirstOrDefault();
-                        return val.IsNumber ? val.AsInt64 : 0;
+                        var sizeVal = doc["Size"];
+                        if (sizeVal.IsNumber)
+                        {
+                            total += sizeVal.AsInt64;
+                            count++;
+                        }
                     }
+                    _logger.LogInformation("Calculated total size from {Count} files: {Total}", count, total);
+                    return total;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Error calculating total size via SQL, falling back.");
-                    try 
-                    {
-                        var col = _db.GetCollection<DriveItemModel>(CollectionName);
-                        return col.Find(x => !x.IsFolder).Sum(x => x.Size ?? 0);
-                    }
-                    catch {}
+                    _logger.LogError(ex, "Error calculating total size.");
+                    return 0;
                 }
-                return 0;
             }
         }
 
@@ -246,25 +245,29 @@ namespace OneDriveTidy.Core.Services
                 _logger.LogInformation("Calculating duplicate stats...");
                 try 
                 {
-                    // Use MAX(Size) instead of FIRST(Size)
-                    // Ensure we dispose the reader to release locks!
-                    using var result = _db.Execute(@"
-                        SELECT COUNT(*) AS Cnt, MAX(Size) AS Sz
-                        FROM driveItems
-                        WHERE IsFolder = false AND ContentHash != null
-                        GROUP BY ContentHash
-                        HAVING COUNT(*) > 1
-                    ");
+                    var col = _db.GetCollection<BsonDocument>(CollectionName);
+                    
+                    // Fetch only relevant fields as BsonDocuments
+                    // We filter by IsFolder=false and ContentHash!=null
+                    var query = col.Query()
+                        .Where("$.IsFolder = false AND $.ContentHash != null")
+                        .Select("{ ContentHash: $.ContentHash, Size: $.Size }")
+                        .ToEnumerable();
+
+                    var groups = query
+                        .GroupBy(x => x["ContentHash"].AsString)
+                        .Where(g => g.Count() > 1);
 
                     int groupCount = 0;
                     long wastedSize = 0;
 
-                    while(result.Read())
+                    foreach(var group in groups)
                     {
-                        var row = result.Current;
                         groupCount++;
-                        var count = row["Cnt"].AsInt32;
-                        var size = row["Sz"].AsInt64;
+                        var count = group.Count();
+                        // Assuming all items in group have same size, take the first one
+                        var first = group.First();
+                        var size = first["Size"].IsNumber ? first["Size"].AsInt64 : 0;
                         wastedSize += (count - 1) * size;
                     }
                     
@@ -273,7 +276,7 @@ namespace OneDriveTidy.Core.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error calculating duplicate stats via SQL.");
+                    _logger.LogError(ex, "Error calculating duplicate stats.");
                     return (0, 0);
                 }
             }
