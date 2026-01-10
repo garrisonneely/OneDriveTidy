@@ -5,6 +5,7 @@ using Microsoft.Graph.Models;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -68,7 +69,7 @@ namespace OneDriveTidy.Core.Services
         public async Task InitializeStructureAsync(CancellationToken cancellationToken = default)
         {
             if (_graphService.Client == null)
-                throw new InvalidOperationException("Graph Client not initialized.");
+                throw new InvalidOperationException("Graph Client not initialized. Please log in first.");
 
             _logger.LogInformation("Initializing HSA folder structure...");
             StatusChanged?.Invoke("Initializing HSA structure...");
@@ -79,18 +80,34 @@ namespace OneDriveTidy.Core.Services
                 if (drive?.Id == null)
                     throw new InvalidOperationException("Could not get Drive ID");
 
+                _logger.LogInformation("Drive ID: {DriveId}", drive.Id);
+
                 // Ensure HSA folder
                 _hsaFolderId = await EnsureFolderAsync(drive.Id, "root", HSA_FOLDER_NAME, cancellationToken);
                 if (_hsaFolderId == null)
-                    throw new InvalidOperationException("Failed to create HSA folder");
+                {
+                    _logger.LogError("Failed to create HSA folder - EnsureFolderAsync returned null");
+                    throw new InvalidOperationException("Failed to create HSA folder. Check logs for details.");
+                }
+
+                _logger.LogInformation("HSA Folder ID: {HsaFolderId}", _hsaFolderId);
 
                 // Ensure Receipts subfolder
                 _receiptsFolderId = await EnsureFolderAsync(drive.Id, _hsaFolderId, RECEIPTS_FOLDER_NAME, cancellationToken);
                 if (_receiptsFolderId == null)
-                    throw new InvalidOperationException("Failed to create Receipts folder");
+                {
+                    _logger.LogError("Failed to create Receipts folder - EnsureFolderAsync returned null");
+                    throw new InvalidOperationException("Failed to create Receipts folder. Check logs for details.");
+                }
+
+                _logger.LogInformation("Receipts Folder ID: {ReceiptsFolderId}", _receiptsFolderId);
 
                 // Ensure Ledger file
                 _ledgerFileId = await EnsureLedgerFileAsync(drive.Id, _hsaFolderId, cancellationToken);
+                if (_ledgerFileId == null)
+                {
+                    _logger.LogWarning("Failed to create ledger file, but will continue");
+                }
 
                 _logger.LogInformation("HSA structure initialized successfully");
                 StatusChanged?.Invoke("HSA structure initialized");
@@ -143,7 +160,7 @@ namespace OneDriveTidy.Core.Services
                     throw new InvalidOperationException("Failed to upload file");
 
                 // Add row to Excel ledger
-                await AddLedgerEntryAsync(drive.Id, receiptDate, vendor, amount, description, standardizedName, uploadedFile.WebUrl, cancellationToken);
+                AddLedgerEntryAsync(drive.Id, receiptDate, vendor, amount, description, standardizedName, uploadedFile.WebUrl);
 
                 _logger.LogInformation("Receipt uploaded successfully: {FileName}", standardizedName);
                 StatusChanged?.Invoke($"Receipt uploaded: {standardizedName}");
@@ -188,19 +205,36 @@ namespace OneDriveTidy.Core.Services
         {
             try
             {
-                // Check if folder exists
-                var children = await _graphService.Client!.Drives[driveId].Items[parentId].Children
-                    .GetAsync(c =>
-                    {
-                        c.QueryParameters.Filter = $"name eq '{folderName}' and folder ne null";
-                        c.QueryParameters.Select = new[] { "id" };
-                    }, cancellationToken);
+                _logger.LogInformation("Ensuring folder '{FolderName}' in parent '{ParentId}'", folderName, parentId);
 
-                if (children?.Value != null && children.Value.Count > 0)
+                // Check if folder exists - fetch all children and filter in code
+                try
                 {
-                    _logger.LogInformation("Folder '{FolderName}' already exists", folderName);
-                    return children.Value[0].Id;
+                    var children = await _graphService.Client!.Drives[driveId].Items[parentId].Children
+                        .GetAsync(c =>
+                        {
+                            c.QueryParameters.Select = new[] { "id", "name", "folder" };
+                            c.QueryParameters.Top = 999;
+                        }, cancellationToken);
+
+                    if (children?.Value != null)
+                    {
+                        var existingFolder = children.Value.FirstOrDefault(item => 
+                            item.Name == folderName && item.Folder != null);
+                        
+                        if (existingFolder?.Id != null)
+                        {
+                            _logger.LogInformation("Folder '{FolderName}' already exists with ID: {FolderId}", folderName, existingFolder.Id);
+                            return existingFolder.Id;
+                        }
+                    }
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error checking for existing folder '{FolderName}', will attempt to create", folderName);
+                }
+
+                _logger.LogInformation("Folder '{FolderName}' not found, creating new one...", folderName);
 
                 // Create folder
                 var newFolder = new DriveItem
@@ -209,19 +243,25 @@ namespace OneDriveTidy.Core.Services
                     Folder = new Folder { },
                     AdditionalData = new Dictionary<string, object>
                     {
-                        { "@microsoft.graph.conflictBehavior", "fail" }
+                        { "@microsoft.graph.conflictBehavior", "rename" }
                     }
                 };
 
                 var created = await _graphService.Client!.Drives[driveId].Items[parentId].Children
                     .PostAsync(newFolder, cancellationToken: cancellationToken);
 
-                _logger.LogInformation("Created folder: {FolderName}", folderName);
-                return created?.Id;
+                if (created?.Id == null)
+                {
+                    _logger.LogError("Failed to create folder '{FolderName}' - returned item has no ID", folderName);
+                    return null;
+                }
+
+                _logger.LogInformation("Created folder '{FolderName}' with ID: {FolderId}", folderName, created.Id);
+                return created.Id;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to ensure folder {FolderName}", folderName);
+                _logger.LogError(ex, "Error ensuring folder '{FolderName}': {Message}", folderName, ex.Message);
                 return null;
             }
         }
@@ -230,22 +270,34 @@ namespace OneDriveTidy.Core.Services
         {
             try
             {
-                // Check if file exists
-                var children = await _graphService.Client!.Drives[driveId].Items[hsaFolderId].Children
-                    .GetAsync(c =>
-                    {
-                        c.QueryParameters.Filter = $"name eq '{LEDGER_FILE_NAME}'";
-                        c.QueryParameters.Select = new[] { "id" };
-                    }, cancellationToken);
-
-                if (children?.Value != null && children.Value.Count > 0)
+                // Check if file exists - fetch all children and filter in code
+                try
                 {
-                    _logger.LogInformation("Ledger file already exists");
-                    return children.Value[0].Id;
+                    var children = await _graphService.Client!.Drives[driveId].Items[hsaFolderId].Children
+                        .GetAsync(c =>
+                        {
+                            c.QueryParameters.Select = new[] { "id", "name", "file" };
+                            c.QueryParameters.Top = 999;
+                        }, cancellationToken);
+
+                    if (children?.Value != null)
+                    {
+                        var existingFile = children.Value.FirstOrDefault(item => 
+                            item.Name == LEDGER_FILE_NAME && item.File != null);
+                        
+                        if (existingFile?.Id != null)
+                        {
+                            _logger.LogInformation("Ledger file already exists");
+                            return existingFile.Id;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error checking for existing ledger file, will attempt to create");
                 }
 
                 // Create a new empty Excel file with headers
-                // Using a basic Excel template structure
                 var ledgerContent = CreateEmptyLedgerContent();
                 var stream = new MemoryStream(ledgerContent);
 
@@ -281,15 +333,14 @@ namespace OneDriveTidy.Core.Services
             }
         }
 
-        private async Task AddLedgerEntryAsync(
+        private void AddLedgerEntryAsync(
             string driveId,
             DateTime receiptDate,
             string vendor,
             decimal amount,
             string description,
             string fileName,
-            string? fileUrl,
-            CancellationToken cancellationToken)
+            string? fileUrl)
         {
             try
             {

@@ -311,12 +311,15 @@ namespace OneDriveTidy.Core.Services
                 }, cancellationToken);
 
             var allItems = new List<DriveItem>();
-            var pageIterator = PageIterator<DriveItem, DriveItemCollectionResponse>.CreatePageIterator(
-                _graphClient, 
-                itemsResponse, 
-                (item) => { allItems.Add(item); return true; }
-            );
-            await pageIterator.IterateAsync(cancellationToken);
+            if (itemsResponse?.Value != null)
+            {
+                var pageIterator = PageIterator<DriveItem, DriveItemCollectionResponse>.CreatePageIterator(
+                    _graphClient, 
+                    itemsResponse, 
+                    (item) => { allItems.Add(item); return true; }
+                );
+                await pageIterator.IterateAsync(cancellationToken);
+            }
 
             _logger.LogInformation("Found {Count} items in folder.", allItems.Count);
             ScanStatusChanged?.Invoke($"Found {allItems.Count} items. Processing...");
@@ -517,7 +520,14 @@ namespace OneDriveTidy.Core.Services
             // 2. EXIF / Photo Metadata
             if (item.Photo?.TakenDateTime != null)
             {
-                return item.Photo.TakenDateTime.Value.DateTime;
+                try
+                {
+                    return item.Photo.TakenDateTime.Value.DateTime;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to parse Photo.TakenDateTime");
+                }
             }
 
             // 3. Creation Time

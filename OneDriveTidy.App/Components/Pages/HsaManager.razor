@@ -3,6 +3,7 @@
 @using System.Globalization
 @using Microsoft.AspNetCore.Components.Forms
 @inject HsaService HsaService
+@inject GraphService GraphService
 @inject ILogger<HsaManager> Logger
 
 <PageTitle>HSA Manager</PageTitle>
@@ -10,6 +11,13 @@
 <h1>HSA Receipt Manager</h1>
 
 <p>Manage your HSA receipts and maintain a central ledger for tax documentation and reimbursement tracking.</p>
+
+@if (!GraphService.IsInitialized)
+{
+    <div class="alert alert-warning" role="alert">
+        <strong>Authentication Required:</strong> Please visit the <a href="/dashboard">Dashboard</a> page to log in to your OneDrive account before using HSA Manager.
+    </div>
+}
 
 <div class="alert alert-info">
     <strong>IRS Documentation:</strong> Retain all HSA receipts indefinitely until reimbursed, plus 3-7 years for audit purposes.
@@ -225,10 +233,9 @@
     private void SetActiveTab(string tab)
     {
         activeTab = tab;
-        StateHasChanged();
     }
 
-    private async Task SaveHsaStartDate()
+    private void SaveHsaStartDate()
     {
         if (hsaStartDateInput == default)
         {
@@ -259,6 +266,12 @@
 
     private async Task InitializeStructure()
     {
+        if (!GraphService.IsInitialized)
+        {
+            errorMessage = "Please log in to OneDrive first. Visit the Dashboard page to authenticate.";
+            return;
+        }
+
         isProcessing = true;
         statusMessage = "Initializing...";
         successMessage = "";

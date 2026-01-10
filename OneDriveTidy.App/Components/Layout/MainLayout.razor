@@ -1,4 +1,7 @@
 ﻿@inherits LayoutComponentBase
+@using OneDriveTidy.Core.Services
+@inject GraphService GraphService
+@inject ILogger<MainLayout> Logger
 
 <div class="page">
     <div class="sidebar">
@@ -7,7 +10,22 @@
 
     <main>
         <div class="top-row px-4">
-            <a href="https://learn.microsoft.com/aspnet/core/" target="_blank">About</a>
+            <button class="btn btn-sm @(GraphService.IsInitialized ? "btn-success" : "btn-primary")" @onclick="Authenticate" disabled="@isAuthenticating">
+                @if (isAuthenticating)
+                {
+                    <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    <span> Authenticating...</span>
+                }
+                else if (GraphService.IsInitialized)
+                {
+                    <span>✓ Authenticated</span>
+                }
+                else
+                {
+                    <span>Authenticate</span>
+                }
+            </button>
+            <a href="https://learn.microsoft.com/aspnet/core/" target="_blank" class="ms-3">About</a>
         </div>
 
         <article class="content px-4">
@@ -21,3 +39,27 @@
     <a href="" class="reload">Reload</a>
     <a class="dismiss">🗙</a>
 </div>
+
+@code {
+    private bool isAuthenticating = false;
+
+    private async Task Authenticate()
+    {
+        if (GraphService.IsInitialized)
+            return;
+
+        isAuthenticating = true;
+        try
+        {
+            await GraphService.InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Authentication failed");
+        }
+        finally
+        {
+            isAuthenticating = false;
+        }
+    }
+}
