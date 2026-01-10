@@ -61,6 +61,27 @@ namespace OneDriveTidy.Core.Services
             }
         }
 
+        public void SaveConfigValue(string key, string value)
+        {
+            lock (_lock)
+            {
+                if (_isDisposed) return;
+                var col = _db.GetCollection<BsonDocument>(ConfigCollectionName);
+                col.Upsert(key, new BsonDocument { ["value"] = value });
+            }
+        }
+
+        public string? GetConfigValue(string key)
+        {
+            lock (_lock)
+            {
+                if (_isDisposed) return null;
+                var col = _db.GetCollection<BsonDocument>(ConfigCollectionName);
+                var doc = col.FindById(key);
+                return doc?["value"].AsString;
+            }
+        }
+
         public void UpsertItem(DriveItemModel item)
         {
             lock (_lock)

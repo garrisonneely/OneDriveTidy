@@ -1,0 +1,373 @@
+@page "/hsa-manager"
+@using OneDriveTidy.Core.Services
+@using System.Globalization
+@using Microsoft.AspNetCore.Components.Forms
+@inject HsaService HsaService
+@inject ILogger<HsaManager> Logger
+
+<PageTitle>HSA Manager</PageTitle>
+
+<h1>HSA Receipt Manager</h1>
+
+<p>Manage your HSA receipts and maintain a central ledger for tax documentation and reimbursement tracking.</p>
+
+<div class="alert alert-info">
+    <strong>IRS Documentation:</strong> Retain all HSA receipts indefinitely until reimbursed, plus 3-7 years for audit purposes.
+    Only expenses incurred after your HSA was established are eligible for tax-free reimbursement.
+</div>
+
+<!-- Tabs -->
+<div class="mb-3">
+    <ul class="nav nav-tabs" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeTab == "settings" ? "active" : "")" @onclick="@(async () => SetActiveTab("settings"))" type="button">Settings</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(activeTab == "upload" ? "active" : "")" @onclick="@(async () => SetActiveTab("upload"))" type="button">Upload Receipt</button>
+        </li>
+    </ul>
+</div>
+
+<!-- Settings Tab -->
+@if (activeTab == "settings")
+{
+    <div class="tab-pane fade show active">
+        <div class="row">
+            <div class="col-md-6">
+                <h4>HSA Configuration</h4>
+                
+                <div class="mb-3">
+                    <label for="hsaStartDate" class="form-label">HSA Start Date</label>
+                    <input type="date" class="form-control" id="hsaStartDate" @bind="hsaStartDateInput" />
+                    <small class="form-text text-muted">The date your current HSA was established. Only expenses after this date are eligible for reimbursement.</small>
+                </div>
+
+                <button class="btn btn-primary" @onclick="SaveHsaStartDate" disabled="@isProcessing">
+                    @if (isProcessing)
+                    {
+                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        <span> Saving...</span>
+                    }
+                    else
+                    {
+                        <span>Save HSA Start Date</span>
+                    }
+                </button>
+
+                @if (!string.IsNullOrEmpty(successMessage))
+                {
+                    <div class="alert alert-success mt-3">@successMessage</div>
+                }
+
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="alert alert-danger mt-3">@errorMessage</div>
+                }
+
+                <hr />
+
+                <h4>HSA Structure</h4>
+                <p>Ensure your HSA folder structure and master ledger are initialized in OneDrive.</p>
+                <button class="btn btn-success" @onclick="InitializeStructure" disabled="@isProcessing">
+                    @if (isProcessing)
+                    {
+                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        <span> Initializing...</span>
+                    }
+                    else
+                    {
+                        <span>Initialize HSA Structure</span>
+                    }
+                </button>
+
+                <div class="mt-3">
+                    <h5>Folder Structure</h5>
+                    <ul class="list-unstyled">
+                        <li>📁 HSA/</li>
+                        <li class="ms-3">📁 Receipts/ (for receipt files)</li>
+                        <li class="ms-3">📄 HSA_Master_Ledger.xlsx (tracking spreadsheet)</li>
+                    </ul>
+                </div>
+
+                <div class="mt-3">
+                    <p><strong>Status:</strong> <span class="badge bg-info">@statusMessage</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- Upload Receipt Tab -->
+@if (activeTab == "upload")
+{
+    <div class="tab-pane fade show active">
+        <div class="row">
+            <div class="col-md-8">
+                <h4>Upload New Receipt</h4>
+
+                @if (currentHsaStartDate.HasValue)
+                {
+                    <div class="alert alert-info">
+                        Your HSA start date is <strong>@currentHsaStartDate.Value:yyyy-MM-dd</strong>. 
+                        Only expenses on or after this date are eligible for reimbursement from this HSA.
+                    </div>
+                }
+                else
+                {
+                    <div class="alert alert-warning">
+                        <strong>Note:</strong> Please set your HSA start date in the Settings tab first.
+                    </div>
+                }
+
+                <form>
+                    <div class="mb-3">
+                        <label for="receiptDate" class="form-label">Receipt Date *</label>
+                        <input type="date" class="form-control" id="receiptDate" @bind="uploadForm.ReceiptDate" />
+                        @if (currentHsaStartDate.HasValue && uploadForm.ReceiptDate < currentHsaStartDate.Value)
+                        {
+                            <small class="form-text text-danger">⚠️ This date is before your HSA start date. This expense may not be eligible for reimbursement.</small>
+                        }
+                        else if (currentHsaStartDate.HasValue && uploadForm.ReceiptDate <= currentHsaStartDate.Value)
+                        {
+                            <small class="form-text text-success">✓ This date is eligible for your current HSA.</small>
+                        }
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="vendor" class="form-label">Vendor/Provider *</label>
+                        <input type="text" class="form-control" id="vendor" @bind="uploadForm.Vendor" placeholder="e.g., CVS Pharmacy, Dr. Smith's Office" />
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="amount" class="form-label">Amount ($) *</label>
+                        <input type="number" class="form-control" id="amount" @bind="uploadForm.Amount" placeholder="0.00" step="0.01" />
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="description" class="form-label">Description</label>
+                        <textarea class="form-control" id="description" @bind="uploadForm.Description" rows="3" placeholder="e.g., Annual physical exam, prescription antibiotics"></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="receiptFile" class="form-label">Receipt File (Image/PDF) *</label>
+                        <InputFile id="receiptFile" OnChange="@HandleFileSelected" accept="image/*,.pdf" class="form-control" />
+                        <small class="form-text text-muted">Upload a photo or PDF of your receipt.</small>
+                    </div>
+
+                    <button type="button" class="btn btn-primary" @onclick="UploadReceipt" disabled="@(isUploading || !IsUploadFormValid())">
+                        @if (isUploading)
+                        {
+                            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                            <span> Uploading...</span>
+                        }
+                        else
+                        {
+                            <span>Upload Receipt</span>
+                        }
+                    </button>
+                </form>
+
+                @if (!string.IsNullOrEmpty(uploadSuccessMessage))
+                {
+                    <div class="alert alert-success mt-3">@uploadSuccessMessage</div>
+                }
+
+                @if (!string.IsNullOrEmpty(uploadErrorMessage))
+                {
+                    <div class="alert alert-danger mt-3">@uploadErrorMessage</div>
+                }
+
+                <div class="mt-3">
+                    <p><strong>Upload Status:</strong> <span class="badge bg-info">@uploadStatusMessage</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private string activeTab = "settings";
+    private string statusMessage = "Ready";
+    private string uploadStatusMessage = "Ready";
+    private DateTime hsaStartDateInput = DateTime.Today;
+    private DateTime? currentHsaStartDate;
+    private bool isProcessing = false;
+    private bool isUploading = false;
+    private string successMessage = "";
+    private string errorMessage = "";
+    private string uploadSuccessMessage = "";
+    private string uploadErrorMessage = "";
+    private IBrowserFile? selectedFile;
+
+    private UploadFormModel uploadForm = new UploadFormModel 
+    { 
+        ReceiptDate = DateTime.Today,
+        Vendor = "",
+        Amount = 0m,
+        Description = ""
+    };
+
+    protected override void OnInitialized()
+    {
+        HsaService.StatusChanged += OnStatusChanged;
+        LoadCurrentHsaStartDate();
+    }
+
+    private void LoadCurrentHsaStartDate()
+    {
+        currentHsaStartDate = HsaService.GetHsaStartDate();
+        if (currentHsaStartDate.HasValue)
+        {
+            hsaStartDateInput = currentHsaStartDate.Value;
+        }
+    }
+
+    private void SetActiveTab(string tab)
+    {
+        activeTab = tab;
+        StateHasChanged();
+    }
+
+    private async Task SaveHsaStartDate()
+    {
+        if (hsaStartDateInput == default)
+        {
+            errorMessage = "Please select a valid date.";
+            return;
+        }
+
+        isProcessing = true;
+        successMessage = "";
+        errorMessage = "";
+
+        try
+        {
+            HsaService.SetHsaStartDate(hsaStartDateInput);
+            currentHsaStartDate = hsaStartDateInput;
+            successMessage = $"HSA start date saved: {hsaStartDateInput:yyyy-MM-dd}";
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error saving HSA start date");
+            errorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private async Task InitializeStructure()
+    {
+        isProcessing = true;
+        statusMessage = "Initializing...";
+        successMessage = "";
+        errorMessage = "";
+
+        try
+        {
+            await HsaService.InitializeStructureAsync();
+            successMessage = "HSA structure initialized successfully!";
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error initializing HSA structure");
+            errorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+            statusMessage = "Ready";
+        }
+    }
+
+    private bool IsUploadFormValid()
+    {
+        return !string.IsNullOrWhiteSpace(uploadForm.Vendor) &&
+               uploadForm.Amount > 0 &&
+               uploadForm.ReceiptDate != default;
+    }
+
+    private async Task UploadReceipt()
+    {
+        if (!IsUploadFormValid())
+        {
+            uploadErrorMessage = "Please fill in all required fields.";
+            return;
+        }
+
+        if (selectedFile == null)
+        {
+            uploadErrorMessage = "Please select a file to upload.";
+            return;
+        }
+
+        isUploading = true;
+        uploadStatusMessage = "Uploading...";
+        uploadSuccessMessage = "";
+        uploadErrorMessage = "";
+
+        try
+        {
+            using var stream = selectedFile.OpenReadStream();
+            
+            await HsaService.UploadReceiptAsync(
+                uploadForm.ReceiptDate,
+                uploadForm.Vendor,
+                uploadForm.Amount,
+                uploadForm.Description,
+                stream,
+                selectedFile.Name
+            );
+
+            uploadSuccessMessage = $"Receipt uploaded successfully! File: {selectedFile.Name}";
+            ResetUploadForm();
+            selectedFile = null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error uploading receipt");
+            uploadErrorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isUploading = false;
+            uploadStatusMessage = "Ready";
+        }
+    }
+
+    private void HandleFileSelected(InputFileChangeEventArgs e)
+    {
+        selectedFile = e.File;
+    }
+
+    private void ResetUploadForm()
+    {
+        uploadForm = new UploadFormModel 
+        { 
+            ReceiptDate = DateTime.Today,
+            Vendor = string.Empty,
+            Amount = 0m,
+            Description = string.Empty
+        };
+    }
+
+    private void OnStatusChanged(string status)
+    {
+        statusMessage = status;
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        HsaService.StatusChanged -= OnStatusChanged;
+    }
+
+    private class UploadFormModel
+    {
+        public DateTime ReceiptDate { get; set; }
+        public string Vendor { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public string Description { get; set; } = string.Empty;
+    }
+}

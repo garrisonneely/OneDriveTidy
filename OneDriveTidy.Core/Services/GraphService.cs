@@ -29,6 +29,8 @@ namespace OneDriveTidy.Core.Services
         public event Action<string>? ScanStatusChanged;
         public event Action<int>? ItemsProcessed;
 
+        public GraphServiceClient? Client => _graphClient;
+
         public GraphService(DatabaseService dbService, IConfiguration configuration, ILogger<GraphService> logger)
         {
             _dbService = dbService;

@@ -25,6 +25,7 @@ builder.Services.AddSingleton<DatabaseService>(sp =>
     return new DatabaseService(dbPath, logger);
 });
 builder.Services.AddSingleton<GraphService>();
+builder.Services.AddSingleton<HsaService>();
 
 var app = builder.Build();
 
