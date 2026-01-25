@@ -143,13 +143,26 @@
 
                     <div class="mb-3">
                         <label for="vendor" class="form-label">Vendor/Provider *</label>
-                        <input type="text" class="form-control" id="vendor" @bind="uploadForm.Vendor" placeholder="e.g., CVS Pharmacy, Dr. Smith's Office" />
+                        <input type="text" class="form-control" id="vendor" @bind="uploadForm.Vendor" list="vendorList" placeholder="e.g., CVS Pharmacy, Dr. Smith's Office" @oninput="OnVendorInput" />
+                        <datalist id="vendorList">
+                            @foreach (var v in distinctVendors)
+                            {
+                                <option value="@v"></option>
+                            }
+                        </datalist>
                     </div>
 
                     <div class="mb-3">
                         <label for="amount" class="form-label">Amount ($) *</label>
                         <input type="number" class="form-control" id="amount" @bind="uploadForm.Amount" placeholder="0.00" step="0.01" />
                     </div>
+                    
+                    @if (isDuplicateWarningVisible) 
+                    {
+                        <div class="alert alert-warning">
+                            <strong>Duplicate Warning:</strong> A receipt with this date, vendor, and amount already exists in your ledger.
+                        </div>
+                    }
 
                     <div class="mb-3">
                         <label for="description" class="form-label">Description</label>
@@ -158,8 +171,8 @@
 
                     <div class="mb-3">
                         <label for="receiptFile" class="form-label">Receipt File (Image/PDF) *</label>
-                        <InputFile id="receiptFile" OnChange="@HandleFileSelected" accept="image/*,.pdf" class="form-control" />
-                        <small class="form-text text-muted">Upload a photo or PDF of your receipt.</small>
+                        <InputFile @key="inputFileId" id="receiptFile" OnChange="@HandleFileSelected" accept="image/*,.pdf" class="form-control" />
+                        <small class="form-text text-muted">Upload a photo or PDF of your receipt (Max 50MB).</small>
                     </div>
 
                     <button type="button" class="btn btn-primary" @onclick="UploadReceipt" disabled="@(isUploading || !IsUploadFormValid())">
@@ -206,6 +219,11 @@
     private string uploadSuccessMessage = "";
     private string uploadErrorMessage = "";
     private IBrowserFile? selectedFile;
+    private Guid inputFileId = Guid.NewGuid();
+
+    private List<HsaService.LedgerEntry> ledgerEntries = new();
+    private List<string> distinctVendors = new();
+    private bool isDuplicateWarningVisible = false;
 
     private UploadFormModel uploadForm = new UploadFormModel 
     { 
@@ -220,6 +238,15 @@
         HsaService.StatusChanged += OnStatusChanged;
         LoadCurrentHsaStartDate();
     }
+    
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && GraphService.IsInitialized)
+        {
+            // Load ledger entries in background for autocomplete
+            await LoadLedgerEntries();
+        }
+    }
 
     private void LoadCurrentHsaStartDate()
     {
@@ -229,10 +256,33 @@
             hsaStartDateInput = currentHsaStartDate.Value;
         }
     }
+    
+    private async Task LoadLedgerEntries()
+    {
+        try 
+        {
+             ledgerEntries = await HsaService.GetLedgerEntriesAsync();
+             distinctVendors = ledgerEntries
+                .Select(e => e.Vendor)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct()
+                .OrderBy(v => v)
+                .ToList();
+             InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load ledger entries for autocomplete");
+        }
+    }
 
     private void SetActiveTab(string tab)
     {
         activeTab = tab;
+        if (tab == "upload" && ledgerEntries.Count == 0 && GraphService.IsInitialized)
+        {
+             _ = LoadLedgerEntries();
+        }
     }
 
     private void SaveHsaStartDate()
@@ -281,6 +331,7 @@
         {
             await HsaService.InitializeStructureAsync();
             successMessage = "HSA structure initialized successfully!";
+            await LoadLedgerEntries(); // Reload after init
         }
         catch (Exception ex)
         {
@@ -296,9 +347,27 @@
 
     private bool IsUploadFormValid()
     {
+        // Check duplication (but don't block, just valid form check)
+        CheckDuplicate();
+
         return !string.IsNullOrWhiteSpace(uploadForm.Vendor) &&
                uploadForm.Amount > 0 &&
                uploadForm.ReceiptDate != default;
+    }
+
+    private void CheckDuplicate()
+    {
+        isDuplicateWarningVisible = ledgerEntries.Any(e => 
+            e.Date.Date == uploadForm.ReceiptDate.Date && 
+            e.Vendor.Equals(uploadForm.Vendor, StringComparison.OrdinalIgnoreCase) && 
+            e.Amount == uploadForm.Amount);
+    }
+
+    // Triggered on vendor input to act as "change" for duplication
+    private void OnVendorInput(ChangeEventArgs e)
+    {
+        uploadForm.Vendor = e.Value?.ToString() ?? "";
+        CheckDuplicate();
     }
 
     private async Task UploadReceipt()
@@ -322,7 +391,9 @@
 
         try
         {
-            using var stream = selectedFile.OpenReadStream();
+            // Allow files up to 50MB
+            long maxFileSize = 50 * 1024 * 1024;
+            using var stream = selectedFile.OpenReadStream(maxAllowedSize: maxFileSize);
             
             await HsaService.UploadReceiptAsync(
                 uploadForm.ReceiptDate,
@@ -334,8 +405,14 @@
             );
 
             uploadSuccessMessage = $"Receipt uploaded successfully! File: {selectedFile.Name}";
+            
+            // Add to local list to reflect immediately in duplicate checking
+            ledgerEntries.Add(new HsaService.LedgerEntry(uploadForm.ReceiptDate, uploadForm.Vendor, uploadForm.Amount));
+            if (!distinctVendors.Contains(uploadForm.Vendor)) distinctVendors.Add(uploadForm.Vendor);
+
             ResetUploadForm();
             selectedFile = null;
+            inputFileId = Guid.NewGuid(); // Reset file input
         }
         catch (Exception ex)
         {
@@ -363,6 +440,7 @@
             Amount = 0m,
             Description = string.Empty
         };
+        isDuplicateWarningVisible = false;
     }
 
     private void OnStatusChanged(string status)
