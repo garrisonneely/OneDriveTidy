@@ -269,7 +269,8 @@ namespace OneDriveTidy.Core.Services
                     throw new InvalidOperationException("Could not get Drive ID");
 
                 // Generate standardized filename
-                string standardizedName = GenerateStandardizedName(receiptDate, vendor, amount, fileName);
+                string baseName = GenerateStandardizedName(receiptDate, vendor, amount, fileName);
+                string standardizedName = await EnsureUniqueFilenameAsync(drive.Id, _receiptsFolderId!, baseName, cancellationToken);
 
                 // Upload file to Receipts folder
                 var uploadedFile = await UploadFileAsync(drive.Id, _receiptsFolderId!, standardizedName, fileStream, cancellationToken);
@@ -288,6 +289,26 @@ namespace OneDriveTidy.Core.Services
                 _logger.LogError(ex, "Failed to upload receipt");
                 StatusChanged?.Invoke($"Error uploading receipt: {ex.Message}");
                 throw;
+            }
+        }
+
+        private async Task<string> EnsureUniqueFilenameAsync(string driveId, string folderId, string fileName, CancellationToken cancellationToken)
+        {
+            var existing = await GetFileAsync(driveId, folderId, fileName, cancellationToken);
+            if (existing == null) return fileName;
+
+            string nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+            string ext = Path.GetExtension(fileName);
+            int counter = 2;
+
+            while (true)
+            {
+                string newName = $"{nameWithoutExt}_{counter}{ext}";
+                existing = await GetFileAsync(driveId, folderId, newName, cancellationToken);
+                if (existing == null) return newName;
+                counter++;
+                // Safety valve to prevent infinite loops
+                if (counter > 50) return $"{nameWithoutExt}_{Guid.NewGuid().ToString().Substring(0, 6)}{ext}";
             }
         }
 
